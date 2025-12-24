@@ -1,9 +1,5 @@
 import { createClient } from "@supabase/supabase-js"
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-const supabaseKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-const supabase = createClient(supabaseUrl, supabaseKey)
-
 function transformBrightdataProduct(product) {
   return {
     product_id: product.product_id,
@@ -39,6 +35,14 @@ function transformBrightdataProduct(product) {
   }
 }
 
+function getSupabaseClient() {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "https://aqkeprwxxsryropnhfvm.supabase.co"
+  const supabaseKey =
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFxa2Vwcnd4eHNyeXJvcG5oZnZtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Mzc4MzE4MjksImV4cCI6MjA1MzQwNzgyOX0.1nstrLtlahU3kGAu-UrzgOVw6XwyKU6n5H5q4Taqtus"
+  return createClient(supabaseUrl, supabaseKey)
+}
+
 export async function POST(request) {
   try {
     const { products } = await request.json()
@@ -51,6 +55,8 @@ export async function POST(request) {
     let failed = 0
     const errors = []
     const batchSize = 50 // Increased batch size for faster processing
+
+    const supabase = getSupabaseClient()
 
     for (let i = 0; i < productsArray.length; i += batchSize) {
       const batch = productsArray.slice(i, i + batchSize)

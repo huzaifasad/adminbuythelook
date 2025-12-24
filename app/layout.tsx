@@ -7,9 +7,9 @@ const _geist = Geist({ subsets: ["latin"] });
 const _geistMono = Geist_Mono({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: 'Admin || BTL ',
-  description: ' admin',
-  generator: 'app',
+  title: 'admin App',
+  description: 'Created with admin',
+  generator: 'admin.app',
   icons: {
     icon: [
       {

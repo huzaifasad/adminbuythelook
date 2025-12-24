@@ -1,17 +1,4 @@
-// app/api/brightdata/fetch-sync/route.js
-// FIXED VERSION - Actually connects to BrightData API
-
 import { createClient } from "@supabase/supabase-js"
-
-// IMPORTANT: API routes MUST use service key, not anon key!
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-const supabaseKey = process.env.SUPABASE_SERVICE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-
-if (!supabaseUrl || !supabaseKey) {
-  throw new Error("Missing Supabase credentials. Check your environment variables.")
-}
-
-const supabase = createClient(supabaseUrl, supabaseKey)
 
 function transformBrightdataProduct(product) {
   return {
@@ -48,19 +35,15 @@ function transformBrightdataProduct(product) {
   }
 }
 
-// STEP 1: Get list of snapshots and find latest "ready" one
 async function getLatestSnapshot(apiKey, datasetId) {
-  console.log("[BrightData] Fetching snapshots for dataset:", datasetId)
+  console.log("[v0] Fetching latest snapshot for dataset:", datasetId)
 
-  const response = await fetch(
-    `https://api.brightdata.com/datasets/v3/snapshots?dataset_id=${datasetId}`,
-    {
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        Accept: "application/json",
-      },
-    }
-  )
+  const response = await fetch(`https://api.brightdata.com/datasets/v3/snapshots?dataset_id=${datasetId}`, {
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      Accept: "application/json",
+    },
+  })
 
   if (!response.ok) {
     const errorText = await response.text()
@@ -70,108 +53,96 @@ async function getLatestSnapshot(apiKey, datasetId) {
   const snapshots = await response.json()
 
   if (!snapshots || snapshots.length === 0) {
-    throw new Error("No snapshots found for this dataset")
+    throw new Error("No snapshots found for dataset")
   }
 
-  // Find latest "ready" snapshot
+  // Find the latest snapshot with status "ready"
   const readySnapshots = snapshots.filter((s) => s.status === "ready")
 
   if (readySnapshots.length === 0) {
-    throw new Error("No ready snapshots available. Please wait for BrightData to process data.")
+    throw new Error("No ready snapshots available")
   }
 
-  // Sort by created date (newest first)
-  const latestSnapshot = readySnapshots.sort(
-    (a, b) => new Date(b.created) - new Date(a.created)
-  )[0]
+  // Sort by created date descending and get the first one
+  const latestSnapshot = readySnapshots.sort((a, b) => new Date(b.created) - new Date(a.created))[0]
 
-  console.log("[BrightData] Latest snapshot:", latestSnapshot.snapshot_id, "created:", latestSnapshot.created)
+  console.log("[v0] Found latest snapshot:", latestSnapshot.snapshot_id, "created at", latestSnapshot.created)
 
   return latestSnapshot.snapshot_id
 }
 
-// STEP 2: Download snapshot data
-async function downloadSnapshot(apiKey, snapshotId) {
-  console.log("[BrightData] Downloading snapshot:", snapshotId)
+function getSupabaseClient() {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "https://aqkeprwxxsryropnhfvm.supabase.co"
+  const supabaseKey =
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFxa2Vwcnd4eHNyeXJvcG5oZnZtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Mzc4MzE4MjksImV4cCI6MjA1MzQwNzgyOX0.1nstrLtlahU3kGAu-UrzgOVw6XwyKU6n5H5q4Taqtus"
+  return createClient(supabaseUrl, supabaseKey)
+}
 
-  const response = await fetch(
-    `https://api.brightdata.com/datasets/snapshots/${snapshotId}/download`,
-    {
+export async function POST(request) {
+  const supabase = getSupabaseClient() // Declare supabase variable here
+
+  try {
+    console.log("[v0] Fetch sync triggered at", new Date().toISOString())
+
+    const apiKey = process.env.BRIGHTDATA_API_KEY
+    const datasetId = process.env.BRIGHTDATA_DATASET_ID || "v_mjh8g0ch2a14440g47"
+
+    if (!apiKey) {
+      console.log("[v0] Missing Brightdata API key")
+      return Response.json(
+        {
+          success: false,
+          error: "Brightdata API key not configured. Add BRIGHTDATA_API_KEY to environment variables.",
+        },
+        { status: 400 },
+      )
+    }
+
+    const snapshotId = await getLatestSnapshot(apiKey, datasetId)
+
+    console.log("[v0] Downloading snapshot:", snapshotId)
+    const response = await fetch(`https://api.brightdata.com/datasets/snapshots/${snapshotId}/download`, {
       headers: {
         Authorization: `Bearer ${apiKey}`,
         Accept: "application/json",
       },
-    }
-  )
+    })
 
-  if (!response.ok) {
-    const errorText = await response.text()
-    throw new Error(`Failed to download snapshot: ${response.status} - ${errorText}`)
-  }
-
-  const data = await response.json()
-  return data
-}
-
-export async function POST(request) {
-  const startTime = Date.now()
-
-  try {
-    console.log("[BrightData] Fetch sync started at", new Date().toISOString())
-
-    // Get credentials from environment
-    const apiKey = process.env.BRIGHTDATA_API_KEY
-    const datasetId = process.env.BRIGHTDATA_DATASET_ID
-
-    // Validate credentials
-    if (!apiKey) {
-      console.error("[BrightData] Missing API key")
+    if (!response.ok) {
+      const errorText = await response.text()
+      console.error("[v0] Brightdata download error:", response.status, errorText)
       return Response.json(
         {
           success: false,
-          error: "BRIGHTDATA_API_KEY not configured. Add it to your environment variables.",
+          error: `Brightdata download error: ${response.status} - ${errorText}`,
         },
-        { status: 400 }
+        { status: response.status },
       )
     }
 
-    if (!datasetId) {
-      console.error("[BrightData] Missing dataset ID")
-      return Response.json(
-        {
-          success: false,
-          error: "BRIGHTDATA_DATASET_ID not configured. Add it to your environment variables.",
-        },
-        { status: 400 }
-      )
-    }
-
-    // STEP 1: Get latest snapshot ID
-    const snapshotId = await getLatestSnapshot(apiKey, datasetId)
-
-    // STEP 2: Download the snapshot
-    const products = await downloadSnapshot(apiKey, snapshotId)
+    const products = await response.json()
     const productsArray = Array.isArray(products) ? products : [products]
 
-    console.log(`[BrightData] Downloaded ${productsArray.length} products from snapshot ${snapshotId}`)
+    console.log(`[v0] Downloaded ${productsArray.length} products from snapshot ${snapshotId}`)
 
-    // STEP 3: Process and sync to Supabase
     let added = 0
     let updated = 0
     let failed = 0
     const batchSize = 20
 
+    // Process in batches
     for (let i = 0; i < productsArray.length; i += batchSize) {
       const batch = productsArray.slice(i, i + batchSize)
       console.log(
-        `[BrightData] Processing batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(productsArray.length / batchSize)}`
+        `[v0] Processing batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(productsArray.length / batchSize)}`,
       )
 
       for (const product of batch) {
         try {
           const transformed = transformBrightdataProduct(product)
 
-          // Check if exists
+          // Check if product exists
           const { data: existing } = await supabase
             .from("zara_cloth_test")
             .select("id")
@@ -181,7 +152,6 @@ export async function POST(request) {
             .maybeSingle()
 
           if (existing) {
-            // Update existing
             const { error: updateError } = await supabase
               .from("zara_cloth_test")
               .update(transformed)
@@ -190,24 +160,19 @@ export async function POST(request) {
             if (updateError) throw updateError
             updated++
           } else {
-            // Insert new
-            const { error: insertError } = await supabase
-              .from("zara_cloth_test")
-              .insert([transformed])
+            const { error: insertError } = await supabase.from("zara_cloth_test").insert([transformed])
 
             if (insertError) throw insertError
             added++
           }
         } catch (err) {
           failed++
-          console.error("[BrightData] Product sync error:", err.message)
+          console.error("[v0] Product sync error:", err.message)
         }
       }
     }
 
-    const duration = ((Date.now() - startTime) / 1000).toFixed(2)
-
-    // Log to sync history
+    // Log sync history
     await supabase.from("brightdata_sync_history").insert([
       {
         sync_method: "fetch_button",
@@ -220,7 +185,7 @@ export async function POST(request) {
       },
     ])
 
-    console.log(`[BrightData] Sync completed: ${added} added, ${updated} updated, ${failed} failed in ${duration}s`)
+    console.log(`[v0] Fetch sync completed: ${added} added, ${updated} updated, ${failed} failed`)
 
     return Response.json({
       success: true,
@@ -228,14 +193,9 @@ export async function POST(request) {
       added,
       updated,
       failed,
-      snapshotId,
-      duration: parseFloat(duration),
     })
-
   } catch (error) {
-    const duration = ((Date.now() - startTime) / 1000).toFixed(2)
-    
-    console.error("[BrightData] Fetch sync error:", error)
+    console.error("[v0] Fetch sync error:", error)
 
     // Log failed sync
     await supabase.from("brightdata_sync_history").insert([
@@ -247,13 +207,6 @@ export async function POST(request) {
       },
     ])
 
-    return Response.json(
-      { 
-        success: false, 
-        error: error.message,
-        duration: parseFloat(duration)
-      }, 
-      { status: 500 }
-    )
+    return Response.json({ success: false, error: error.message }, { status: 500 })
   }
 }
