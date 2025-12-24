@@ -150,6 +150,9 @@ export default function BrightdataSyncPage() {
   const [syncLogs, setSyncLogs] = useState([]) // Real-time logs
   const [lastSyncMethod, setLastSyncMethod] = useState(null) // Track which method was used
   const logsEndRef = useRef(null) // Added ref for auto-scroll
+  const [activeSyncJobId, setActiveSyncJobId] = useState(null)
+  const [stopRequested, setStopRequested] = useState(false)
+  const syncPollingRef = useRef(null)
 
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -158,6 +161,7 @@ export default function BrightdataSyncPage() {
   useEffect(() => {
     loadSyncHistory()
     loadStats()
+    checkActiveSyncJob()
   }, [])
 
   const loadSyncHistory = async () => {
@@ -169,14 +173,14 @@ export default function BrightdataSyncPage() {
         .limit(10)
 
       if (error && error.code === "42P01") {
-        console.log("[v0] brightdata_sync_history table not found - run SQL script first")
+        console.log(" brightdata_sync_history table not found - run SQL script first")
         toast.error("Please run the SQL script first to create the brightdata_sync_history table")
         return
       }
       if (error) throw error
       setSyncHistory(data || [])
     } catch (err) {
-      console.error("[v0] Error loading sync history:", err)
+      console.error(" Error loading sync history:", err)
       toast.error("Failed to load sync history")
     }
   }
@@ -205,7 +209,7 @@ export default function BrightdataSyncPage() {
       })
       setLastSyncMethod(syncData?.[0]?.sync_method || null)
     } catch (err) {
-      console.error("[v0] Error loading stats:", err)
+      console.error(" Error loading stats:", err)
       toast.error("Failed to load stats")
     }
   }
@@ -229,7 +233,7 @@ export default function BrightdataSyncPage() {
       setFilteredProducts(data || [])
       setTotalProducts(count || 0)
     } catch (err) {
-      console.error("[v0] Error loading products:", err)
+      console.error(" Error loading products:", err)
       toast.error("Failed to load products")
     } finally {
       setLoading(false)
@@ -271,8 +275,14 @@ export default function BrightdataSyncPage() {
       return
     }
 
+    if (syncing) {
+      toast.error("A sync is already in progress. Please wait for it to complete.")
+      return
+    }
+
     setSyncing(true)
     setSyncLogs([])
+    setStopRequested(false)
     addLog("Starting manual sync...", "info")
 
     try {
@@ -302,117 +312,48 @@ export default function BrightdataSyncPage() {
         return
       }
 
-      let added = 0
-      let updated = 0
-      let failed = 0
-      const errors = []
+      const { data: jobData, error: jobError } = await supabase
+        .from("brightdata_sync_history")
+        .insert([
+          {
+            sync_method: "manual",
+            status: "processing",
+            total_processed: 0,
+            processed_count: 0,
+            progress_percentage: 0,
+          },
+        ])
+        .select("job_id")
+        .single()
 
-      const batchSize = 20
-      for (let i = 0; i < productsToSync.length; i += batchSize) {
-        const batch = productsToSync.slice(i, Math.min(i + batchSize, productsToSync.length))
-        const batchResults = await Promise.all(
-          batch.map(async (product) => {
-            try {
-              const transformedProduct = transformBrightdataProduct(product)
+      if (jobError) throw jobError
+      const jobId = jobData.job_id
+      setActiveSyncJobId(jobId)
 
-              console.log("[v0] Transformed product fields:", {
-                colour_code: transformedProduct.colour_code,
-                category_id: transformedProduct.category_id,
-                seo_category_id: transformedProduct.seo_category_id,
-                colour_code_type: typeof transformedProduct.colour_code,
-                category_id_type: typeof transformedProduct.category_id,
-                seo_category_id_type: typeof transformedProduct.seo_category_id,
-              })
+      addLog(`Created sync job: ${jobId}`, "info")
 
-              const { data: existing, error: checkError } = await supabase
-                .from("zara_cloth_test")
-                .select("id")
-                .eq("product_id", transformedProduct.product_id)
-                .eq("colour_code", transformedProduct.colour_code || "")
-                .eq("size", transformedProduct.size || "")
-                .maybeSingle()
+      const response = await fetch("/api/brightdata/manual-sync-bg", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ products: productsToSync, jobId }),
+      })
 
-              if (checkError && checkError.code !== "PGRST116") throw checkError
-
-              if (existing) {
-                const { error: updateError } = await supabase
-                  .from("zara_cloth_test")
-                  .update({
-                    ...transformedProduct,
-                    updated_at: new Date().toISOString(),
-                  })
-                  .eq("id", existing.id)
-
-                if (updateError) throw updateError
-                return { type: "updated", name: transformedProduct.product_name || transformedProduct.product_id }
-              } else {
-                const { error: insertError } = await supabase.from("zara_cloth_test").insert([transformedProduct])
-
-                if (insertError) throw insertError
-                return { type: "added", name: transformedProduct.product_name || transformedProduct.product_id }
-              }
-            } catch (err) {
-              console.error("[v0] Error processing product:", err)
-              const productName = product.product_name || product.product_id || "Unknown Product"
-              return { type: "failed", error: err.message, name: productName }
-            }
-          }),
-        )
-
-        batchResults.forEach((result) => {
-          if (result.type === "added") {
-            added++
-            addLog(`✓ Added: ${result.name}`, "success")
-          } else if (result.type === "updated") {
-            updated++
-            addLog(`↻ Updated: ${result.name}`, "info")
-          } else if (result.type === "failed") {
-            failed++
-            errors.push(`${result.name}: ${result.error}`)
-            addLog(`✗ Failed: ${result.name}`, "error")
-          }
-        })
-
-        const processed = Math.min(i + batchSize, productsToSync.length)
-        addLog(`Processing batch: ${processed}/${productsToSync.length}`, "info")
+      if (!response.ok) {
+        throw new Error(`API error: ${response.statusText}`)
       }
 
-      // Log sync to history
-      const { error: logError } = await supabase.from("brightdata_sync_history").insert([
-        {
-          sync_method: "manual_upload",
-          total_processed: productsToSync.length,
-          total_added: added,
-          total_updated: updated,
-          total_failed: failed,
-          error_details: errors.length > 0 ? errors.slice(0, 10) : null, // Store first 10 errors
-          status: failed === 0 ? "completed" : "completed_with_errors",
-          sync_timestamp: new Date().toISOString(),
-        },
-      ])
-
-      if (logError) console.error("[v0] Error logging sync:", logError)
-
-      const successMessage = `Sync complete: ${added} added, ${updated} updated, ${failed} failed`
-      addLog(successMessage, "success")
-      toast.dismiss()
-      toast.success(successMessage)
-      setJsonInput("")
-      setSelectedFile(null)
-      setLastSyncMethod("manual_upload")
-      loadSyncHistory()
-      loadStats()
-      if (activeTab === "products") {
-        // Refresh products if we are on that tab
-        loadProducts(currentPage)
-      }
+      addLog("Sync request sent to background processor", "info")
+      pollSyncProgress(jobId)
     } catch (err) {
-      console.error("[v0] Manual sync error:", err)
+      console.error(" Error in handleManualUpload:", err)
       addLog(`Error: ${err.message}`, "error")
-      toast.dismiss()
-      toast.error("Sync failed: " + err.message)
-    } finally {
+      toast.error(err.message)
       setSyncing(false)
+      setActiveSyncJobId(null)
+
+      if (activeSyncJobId) {
+        await supabase.from("brightdata_sync_history").update({ status: "failed" }).eq("job_id", activeSyncJobId)
+      }
     }
   }
 
@@ -442,7 +383,7 @@ export default function BrightdataSyncPage() {
         loadProducts(currentPage)
       }
     } catch (err) {
-      console.error("[v0] Fetch sync error:", err)
+      console.error(" Fetch sync error:", err)
       addLog(`Error: ${err.message}`, "error")
       toast.error("Fetch sync failed: " + err.message)
     } finally {
@@ -467,6 +408,110 @@ export default function BrightdataSyncPage() {
 
     setSelectedFile(file)
     toast.success(`File loaded: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`)
+  }
+
+  const checkActiveSyncJob = async () => {
+    try {
+      const { data: activeJob, error } = await supabase
+        .from("brightdata_sync_history")
+        .select("job_id, status, logs, total_added, total_updated, total_failed")
+        .eq("status", "processing")
+        .order("sync_timestamp", { ascending: false })
+        .limit(1)
+        .maybeSingle()
+
+      if (error && error.code !== "PGRST116") {
+        console.error(" Error checking sync:", error.message)
+        return
+      }
+
+      if (activeJob) {
+        setActiveSyncJobId(activeJob.job_id)
+        setSyncing(true)
+
+        // Load existing logs
+        if (activeJob.logs && Array.isArray(activeJob.logs)) {
+          setSyncLogs(activeJob.logs)
+        }
+
+        // Resume polling for this job
+        pollSyncProgress(activeJob.job_id)
+      }
+    } catch (err) {
+      console.error(" Error checking active sync job:", err.message)
+    }
+  }
+
+  const pollSyncProgress = async (jobId) => {
+    const pollInterval = setInterval(async () => {
+      try {
+        const { data, error } = await supabase
+          .from("brightdata_sync_history")
+          .select("*")
+          .eq("job_id", jobId)
+          .maybeSingle()
+
+        if (error) {
+          console.error(" Error polling:", error.message)
+          return
+        }
+
+        if (data) {
+          if (data.logs && Array.isArray(data.logs)) {
+            setSyncLogs(
+              data.logs.map((log) => ({
+                timestamp: new Date().toLocaleTimeString(),
+                message: log,
+                type: log.startsWith("✅") ? "success" : log.startsWith("✏️") ? "info" : "error",
+              })),
+            )
+          }
+
+          if (data.status === "completed" || data.status === "failed" || data.status === "stopped") {
+            clearInterval(pollInterval)
+            setSyncing(false)
+            setActiveSyncJobId(null)
+            setStopRequested(false)
+            loadSyncHistory()
+            loadStats()
+            addLog(
+              `Sync ${data.status}! Added: ${data.total_added}, Updated: ${data.total_updated}, Failed: ${data.total_failed}`,
+              "success",
+            )
+            toast.success(`Sync ${data.status}: ${data.total_added} added, ${data.total_updated} updated`)
+          }
+        }
+      } catch (err) {
+        console.error(" Error polling sync progress:", err.message)
+      }
+    }, 1000)
+
+    syncPollingRef.current = pollInterval
+  }
+
+  const handleStopSync = async () => {
+    if (!activeSyncJobId) return
+
+    try {
+      setStopRequested(true)
+      const { error } = await supabase
+        .from("brightdata_sync_history")
+        .update({ status: "stopped" })
+        .eq("job_id", activeSyncJobId)
+
+      if (error) throw error
+
+      if (syncPollingRef.current) {
+        clearInterval(syncPollingRef.current)
+      }
+
+      setSyncing(false)
+      setActiveSyncJobId(null)
+      toast.success("Sync stopped")
+    } catch (err) {
+      console.error(" Error stopping sync:", err.message)
+      toast.error("Failed to stop sync")
+    }
   }
 
   // Enhanced header with back button
@@ -612,6 +657,26 @@ export default function BrightdataSyncPage() {
                     </>
                   )}
                 </button>
+
+                {syncing && (
+                  <button
+                    onClick={handleStopSync}
+                    disabled={stopRequested}
+                    className="w-full bg-destructive text-destructive-foreground py-3 px-6 rounded-md font-medium hover:bg-destructive/90 disabled:bg-muted disabled:text-muted-foreground disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2"
+                  >
+                    {stopRequested ? (
+                      <>
+                        <Spinner />
+                        Stopping...
+                      </>
+                    ) : (
+                      <>
+                        <X className="w-4 h-4" />
+                        Stop Sync
+                      </>
+                    )}
+                  </button>
+                )}
 
                 {/* Sync Logs */}
                 {syncLogs.length > 0 && (

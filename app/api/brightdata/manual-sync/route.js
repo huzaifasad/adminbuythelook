@@ -168,12 +168,12 @@ export async function POST(request) {
         },
       ])
     } catch (historyErr) {
-      console.error("[v0] Failed to log sync history:", historyErr)
+      console.error(" Failed to log sync history:", historyErr)
     }
 
     return Response.json({ success: true, added, updated, failed, errors: errors.slice(0, 5) })
   } catch (error) {
-    console.error("[v0] Manual sync error:", error)
+    console.error(" Manual sync error:", error)
     return Response.json(
       {
         success: false,
