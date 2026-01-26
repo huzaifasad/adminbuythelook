@@ -199,7 +199,7 @@ export default function BrightdataSyncPage() {
 
       // Fetch total products count separately for the stats section
       const { count } = await supabase
-        .from("zara_cloth_test")
+        .from("zara_cloth_scraper")
         .select("*", { count: "exact", head: true })
         .eq("source", "zara")
 
@@ -221,7 +221,7 @@ export default function BrightdataSyncPage() {
       const to = from + productsPerPage - 1
 
       const { data, error, count } = await supabase
-        .from("zara_cloth_test")
+        .from("zara_cloth_scraper")
         .select("*", { count: "exact" })
         .eq("source", "zara")
         .order("created_at", { ascending: false })
